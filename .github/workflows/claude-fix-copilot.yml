@@ -1,0 +1,74 @@
+name: Claude addresses Copilot review
+
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+
+jobs:
+  address-copilot:
+    # Fires when either:
+    #   (a) Copilot submits a review AND the PR has the "claude-fix" label, OR
+    #   (b) someone comments "/claude-fix" on the PR
+    if: |
+      (github.event_name == 'pull_request_review' &&
+       github.event.review.user.login == 'copilot-pull-request-reviewer[bot]' &&
+       contains(github.event.pull_request.labels.*.name, 'claude-fix'))
+      ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/claude-fix'))
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref || github.head_ref }}
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          prompt: |
+            GitHub Copilot has left review comments on this PR. Your job is to
+            address them thoughtfully — not blindly apply every suggestion.
+
+            Fetch Copilot's inline review comments with:
+              gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/comments" \
+                --paginate \
+                --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")
+                       | {path, line, body, diff_hunk}]'
+
+            Where PR_NUMBER is ${{ github.event.pull_request.number || github.event.issue.number }}.
+
+            Also fetch the review summary(ies):
+              gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews" \
+                --jq '[.[] | select(.user.login == "copilot-pull-request-reviewer[bot]")
+                       | {body, state}]'
+
+            For each inline comment:
+              1. Read the referenced file at the specified line to understand context.
+              2. Decide if the comment is valid. Copilot has false positives —
+                 especially on test files, intentional patterns, and domain-specific
+                 code. Use judgment.
+              3. If valid: make the fix. Keep changes minimal and scoped to the comment.
+              4. If invalid: skip it. Note the reason.
+
+            When done:
+              - Commit all changes in ONE commit: "fix: address Copilot review feedback"
+              - Push to the PR branch (do NOT force-push)
+              - Post a single PR comment summarizing: addressed count, skipped count,
+                and a short list of what was skipped and why
+
+            Rules:
+              - Do not modify code unrelated to Copilot's comments.
+              - Do not add new dependencies.
+              - If a comment requires architectural change, skip it and flag for human review.
+          claude_args: "--model claude-opus-4-6 --max-turns 25"
